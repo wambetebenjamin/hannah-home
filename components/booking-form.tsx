@@ -1,0 +1,80 @@
+"use client";
+import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useForm, type FieldPath } from "react-hook-form";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { ArrowRight, ArrowLeft, Check, CalendarDays, MapPin, ShieldCheck, Clock3, Pencil, LoaderCircle, Wallet, ChevronRight } from "lucide-react";
+import { services, getService, packageIds, packageLabels, formatMoney, formatDate, formatTime } from "@/lib/catalog";
+import { bookingDetailsSchema, type BookingInput, nairobiDate, slotIsFuture } from "@/lib/validation";
+import { ServiceIcon, Notice } from "./ui";
+import { CaptchaNotice, useCaptcha } from "./captcha";
+import type { User } from "@/lib/types";
+import { whatsappUrl } from "@/lib/config";
+const titles = ["What can we help with?", "A time that works for you.", "Where are we heading?", "Let us keep in touch.", "Make yourself at home."];
+const subtitles = ["Choose a service and the size of your home.", "All times are East Africa Time, Nairobi (UTC+3).", "A few details help your professional find you easily.", "We will use these details only to organise your service.", "A quick look over the details, then leave the rest to us."];
+const names = ["Your service", "Date & time", "Your home", "About you", "Review"];
+const fields: FieldPath<BookingInput>[][] = [["serviceId", "packageId"], ["date", "time"], ["area", "address", "instructions"], ["name", "email", "phone"], ["payment", "consent"]];
+export function BookingForm({ initialService, initialPackage, demo, ready, user }: { initialService: string; initialPackage: string; demo: boolean; ready: boolean; user: User | null }) {
+  const router = useRouter(); const reduce = useReducedMotion(); const [step, setStep] = useState(0); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const [timeSlots, setTimeSlots] = useState<{ time: string; available: boolean }[]>([]); const [loadingSlots, setLoadingSlots] = useState(false); const [slotError, setSlotError] = useState(""); const [retry, setRetry] = useState(0);
+  const { getProof, challengeUI } = useCaptcha(demo); const idempotency = useRef(""); const heading = useRef<HTMLHeadingElement>(null); const formRef = useRef<HTMLFormElement>(null);
+  const form = useForm<BookingInput>({ defaultValues: { serviceId: getService(initialService)?.id || "house-cleaning", packageId: packageIds.includes(initialPackage as typeof packageIds[number]) ? initialPackage as typeof packageIds[number] : "1-bedroom", date: "", area: "Kilimani", address: "", instructions: "", name: user?.name || "", email: user?.email || "", phone: "", payment: "mpesa" } });
+  const { register, setValue, watch, getValues, setError: setFieldError, clearErrors, formState: { errors } } = form;
+  const values = watch(); const service = getService(values.serviceId)!; const packageIndex = packageIds.indexOf(values.packageId);
+  useEffect(() => { idempotency.current = crypto.randomUUID(); }, []);
+  useEffect(() => {
+    if (!values.date) return;
+    const controller = new AbortController(); setLoadingSlots(true); setSlotError(""); setTimeSlots([]);
+    fetch(`/api/availability?serviceId=${encodeURIComponent(values.serviceId)}&date=${encodeURIComponent(values.date)}`, { signal: controller.signal })
+      .then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error); setTimeSlots(data.slots); })
+      .catch(e => { if (e.name !== "AbortError") setSlotError(e.message || "Could not load times."); })
+      .finally(() => { if (!controller.signal.aborted) setLoadingSlots(false); });
+    return () => controller.abort();
+  }, [values.serviceId, values.date, retry]);
+  function go(next: number) { setError(""); setStep(next); setTimeout(() => { heading.current?.focus({ preventScroll: true }); formRef.current?.scrollIntoView({ behavior: reduce ? "instant" : "smooth", block: "start" }); }, reduce ? 0 : 250); }
+  function validateStep() {
+    clearErrors(); const result = bookingDetailsSchema.safeParse(getValues()); let invalid = false;
+    if (!result.success) for (const issue of result.error.issues) {
+      const name = issue.path[0] as FieldPath<BookingInput>;
+      if (fields[step].includes(name)) { setFieldError(name, { type: "manual", message: issue.message }); invalid = true; }
+    }
+    if (step === 1 && (!timeSlots.some(s => s.time === values.time && s.available) || !slotIsFuture(values.date, values.time))) { setFieldError("time", { message: "Please choose an available time at least 2 hours from now." }); invalid = true; }
+    if (invalid) setTimeout(() => formRef.current?.querySelector<HTMLElement>("[aria-invalid='true']")?.focus(), 0);
+    return !invalid;
+  }
+  async function submit() {
+    if (busy) return; setError("");
+    const result = bookingDetailsSchema.safeParse(getValues());
+    if (!result.success) { result.error.issues.forEach(issue => setFieldError(issue.path[0] as FieldPath<BookingInput>, { message: issue.message })); setError("Please check the required details and booking terms."); return; }
+    if (!ready) { setError("Online bookings are not yet connected. Please contact us on WhatsApp."); return; }
+    setBusy(true);
+    try {
+      const captchaProof = await getProof("booking");
+      const response = await fetch("/api/bookings/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...result.data, captchaProof, idempotencyKey: idempotency.current }) });
+      const data = await response.json(); if (!response.ok) { if (data.code === "SLOT_TAKEN") { go(1); setRetry(r => r + 1); } throw new Error(data.error || "Your request could not be saved."); }
+      router.push(`/booking-confirmation?ref=${encodeURIComponent(data.reference)}`); router.refresh();
+    } catch (e) { setError(e instanceof Error ? e.message : "Something went wrong. Your booking has not been confirmed."); setBusy(false); }
+  }
+  const errorFor = (key: keyof BookingInput) => errors[key] && <span id={`${key}-error`} className="field-error">{errors[key]?.message as string}</span>;
+  const invalid = (key: keyof BookingInput) => ({ "aria-invalid": !!errors[key], "aria-describedby": errors[key] ? `${key}-error` : undefined });
+  return <><div className="booking-progress" aria-label="Booking progress">{names.map((name, index) => <div key={name} className={`${index === step ? "current" : ""} ${index < step ? "complete" : ""}`} aria-current={index === step ? "step" : undefined}><button type="button" disabled={index > step || busy} onClick={() => go(index)} aria-label={`Step ${index + 1}: ${name}`}><span>{index < step ? <Check size={16}/> : index + 1}</span><strong>{name}</strong></button>{index < 4 && <ChevronRight size={16}/>}</div>)}</div>
+    {demo && <Notice>Preview mode: explore the full booking journey using test details. Nothing is sent to a real professional.</Notice>}
+    {!ready && <Notice>Online booking is not connected yet. You can explore services or <a href={whatsappUrl}>book through WhatsApp</a>.</Notice>}
+    <div className="booking-layout"><form ref={formRef} className="booking-form" noValidate onSubmit={e => { e.preventDefault(); if (step < 4) { if (validateStep()) go(step + 1); } else void submit(); }}>
+      <div className="form-step-heading"><span className="eyebrow">STEP {step + 1} OF 5</span><h2 tabIndex={-1} ref={heading}>{titles[step]}</h2><p>{subtitles[step]}</p></div>
+      <AnimatePresence mode="wait" initial={false}><motion.div key={step} initial={reduce ? false : { opacity: 0, x: 15 }} animate={{ opacity: 1, x: 0 }} exit={reduce ? undefined : { opacity: 0, x: -10 }} transition={{ duration: .18 }}>
+        {step === 0 && <><fieldset><legend>Your service</legend><div className="service-choice-grid">{services.map(s => <label key={s.id} className={`choice-card ${values.serviceId === s.id ? "selected" : ""}`}><input type="radio" value={s.id} {...register("serviceId")} onChange={() => { setValue("serviceId", s.id); setValue("time", undefined as unknown as BookingInput["time"]); }}/><ServiceIcon name={s.icon} size={22}/><span>{s.name}</span>{values.serviceId === s.id && <Check size={14}/>}</label>)}</div>{errorFor("serviceId")}</fieldset><fieldset><legend>Home size and package</legend><div className="package-options">{packageIds.map((id, i) => <label key={id} className={`package-option ${values.packageId === id ? "selected" : ""}`}><input type="radio" value={id} {...register("packageId")}/><span>{packageLabels[i]}<small>About {service.hours[i]} hours</small></span><strong>{formatMoney(service.prices[i])}</strong></label>)}</div></fieldset><p className="small package-exclusions">{service.exclusions}</p><Link className="text-link" href={`/services/${service.slug}`} target="_blank">See everything included <ArrowRight size={15}/></Link></>}
+        {step === 1 && <><label className="field">Choose a date<input type="date" min={nairobiDate()} max={nairobiDate(new Date(Date.now() + 90 * 86400000))} {...register("date")} {...invalid("date")} onChange={e => { setValue("date", e.target.value); setValue("time", undefined as unknown as BookingInput["time"]); }}/>{errorFor("date")}</label><fieldset><legend>Arrival time</legend>{!values.date && <div className="inline-empty"><CalendarDays size={24}/><p>Choose a date to see available times.</p></div>}{loadingSlots && <p role="status"><LoaderCircle className="spin" size={17}/> Finding available times...</p>}{slotError && <Notice error>{slotError}<button type="button" className="text-button" onClick={() => setRetry(r => r + 1)}>Try again</button></Notice>}{!loadingSlots && !slotError && !!timeSlots.length && <div className="time-options">{timeSlots.map(slot => <label key={slot.time} className={`time-option ${values.time === slot.time ? "selected" : ""} ${!slot.available ? "disabled" : ""}`}><input type="radio" value={slot.time} {...register("time")} disabled={!slot.available} {...invalid("time")}/><Clock3 size={17}/>{formatTime(slot.time)}{!slot.available && <small>Unavailable</small>}</label>)}</div>}{errorFor("time")}{!!timeSlots.length && timeSlots.every(s => !s.available) && <p className="field-error">No slots left on this date. Please choose another day.</p>}</fieldset><div className="notice"><Clock3 size={19}/><p>Your selected slot is a request until we confirm your professional. We respond within 2 hours during service hours.</p></div></>}
+        {step === 2 && <><label className="field">Neighbourhood<select {...register("area")} {...invalid("area")}>{bookingDetailsSchema.shape.area.options.map(area => <option key={area}>{area}</option>)}</select>{errorFor("area")}</label><label className="field">Building, street and house number<input {...register("address")} {...invalid("address")} autoComplete="street-address" placeholder="e.g. Garden Apartments, Argwings Kodhek Road, B4" maxLength={250}/>{errorFor("address")}</label><label className="field">Access instructions <span className="optional">(optional)</span><textarea {...register("instructions")} {...invalid("instructions")} rows={4} maxLength={500} placeholder="Gate directions, parking, pets or anything else we should know. Please do not include security PINs."/>{errorFor("instructions")}</label><div className="notice"><ShieldCheck size={19}/><p>Your address is shared only with the people arranging and providing your service.</p></div></>}
+        {step === 3 && <>{!user && <p className="guest-note">Booking as a guest? That is absolutely fine. <Link href="/auth/signin?callbackUrl=/booking">Sign in</Link> before booking to keep it in My bookings.</p>}<label className="field">Full name<input {...register("name")} {...invalid("name")} autoComplete="name" placeholder="Your first and last name" maxLength={100}/>{errorFor("name")}</label><label className="field">Phone number<input {...register("phone")} {...invalid("phone")} type="tel" autoComplete="tel" placeholder="0712345678" maxLength={15}/>{errorFor("phone")}</label><label className="field">Email address<input {...register("email")} {...invalid("email")} type="email" autoComplete="email" placeholder="you@example.com" maxLength={254}/>{errorFor("email")}</label><p className="small">We will never ask for your M-Pesa PIN or account password.</p></>}
+        {step === 4 && <><div className="review-details">{[
+          ["Service", `${service.name}, ${packageLabels[packageIndex]}`, 0],
+          ["Date & time", values.date ? `${formatDate(values.date)} at ${formatTime(values.time || "08:00")} EAT` : "Choose a date", 1],
+          ["Your home", `${values.address}, ${values.area}`, 2],
+          ["Contact", `${values.name}, ${values.phone}, ${values.email}`, 3],
+        ].map(([label, value, target]) => <div key={String(label)}><span><small>{label}</small><strong>{value}</strong></span><button type="button" className="icon-button" aria-label={`Edit ${label}`} onClick={() => go(Number(target))}><Pencil size={16}/></button></div>)}</div>{values.instructions && <p className="small">Access instructions: {values.instructions}</p>}<fieldset><legend>How would you like to pay after the service?</legend><div className="payment-options"><label className={values.payment === "mpesa" ? "selected" : ""}><input type="radio" value="mpesa" {...register("payment")}/><span>M-Pesa<small>Pay the confirmed professional after the job</small></span></label><label className={values.payment === "cash" ? "selected" : ""}><input type="radio" value="cash" {...register("payment")}/><span>Cash<small>Pay after you have checked the work</small></span></label></div></fieldset><label className="check-field"><input type="checkbox" {...register("consent")} {...invalid("consent")}/><span>I agree to the <Link href="/legal/terms" target="_blank">booking terms</Link> and have read the <Link href="/legal/privacy-policy" target="_blank">privacy notice</Link>. I understand this is a request pending professional assignment.</span></label>{errorFor("consent")}<CaptchaNotice demo={demo}/></>}
+      </motion.div></AnimatePresence>
+      {error && <Notice error>{error}</Notice>}<div className="form-navigation">{step > 0 ? <button type="button" disabled={busy} className="back-button" onClick={() => go(step - 1)}><ArrowLeft size={17}/> Back</button> : <span/>}<button className="button" type="submit" disabled={busy || (step === 1 && loadingSlots) || (step === 4 && !ready)}>{busy ? <><LoaderCircle size={18} className="spin"/> Saving your request...</> : step === 4 ? <>{demo ? "Confirm preview booking" : "Confirm booking request"}<Check size={18}/></> : <>Continue <ArrowRight size={18}/></>}</button></div>
+    </form><aside className="booking-summary"><span className="eyebrow">YOUR HOME IS IN GOOD HANDS</span><div className="summary-service"><span className="service-icon"><ServiceIcon name={service.icon}/></span><h3>{service.name}<small>{packageLabels[packageIndex]} package</small></h3></div><div className="summary-meta"><span><CalendarDays size={17}/>{values.date ? formatDate(values.date) : "Your date, your choice"}</span><span><Clock3 size={17}/>{values.time ? `${formatTime(values.time)} EAT` : `About ${service.hours[packageIndex]} hours`}</span><span><MapPin size={17}/>{values.area || "Nairobi"}</span></div><div className="summary-total"><span>Service starting price</span><strong>{formatMoney(service.prices[packageIndex])}</strong></div><p className="summary-payment"><Wallet size={18}/> Nothing to pay now</p><p className="small">Extra parts or work are always quoted for your approval first.</p><div className="summary-divider"/><div className="summary-benefits"><span><ShieldCheck size={18}/> Background-checked professionals</span><span><Clock3 size={18}/> A response within 2 hours</span><span><Check size={18}/> Your satisfaction matters</span></div><div className="summary-help">A question before you book?<a href={whatsappUrl} target="_blank" rel="noopener noreferrer">We are a WhatsApp away <ArrowRight size={15}/></a></div></aside></div>{challengeUI}</>;
+}

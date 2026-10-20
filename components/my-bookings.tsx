@@ -1,0 +1,32 @@
+"use client";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { signOut } from "next-auth/react";
+import Link from "next/link";
+import { CalendarDays, Clock3, MapPin, ArrowUpRight, RotateCcw, MessageSquare, Check, LogOut, LoaderCircle } from "lucide-react";
+import type { Booking, User } from "@/lib/types";
+import { formatDate, formatTime, formatMoney, getService, packageLabels, packageIds } from "@/lib/catalog";
+import { nairobiDate, reviewSchema } from "@/lib/validation";
+import { Modal, Notice, ServiceIcon } from "./ui";
+import { useCaptcha, CaptchaNotice } from "./captcha";
+export function MyBookings({ user, bookings: initial }: { user: User; bookings: Booking[] }) {
+  const router = useRouter(); const [bookings, setBookings] = useState(initial); const [tab, setTab] = useState("upcoming");
+  const [reviewing, setReviewing] = useState<Booking | null>(null); const [rating, setRating] = useState(5); const [comment, setComment] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
+  const { getProof, challengeUI } = useCaptcha(!!user.demo);
+  const isPast = (b: Booking) => ["completed", "cancelled"].includes(b.status) || b.date < nairobiDate();
+  const visible = bookings.filter(b => tab === "past" ? isPast(b) : !isPast(b)).sort((a, b) => tab === "past" ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date));
+  async function logout() { if (user.demo) { await fetch("/api/auth/demo", { method: "DELETE" }); router.push("/auth/signin"); router.refresh(); } else await signOut({ redirectTo: "/" }); }
+  async function review() {
+    if (!reviewing || busy) return; setError("");
+    const result = reviewSchema.omit({ captchaProof: true }).safeParse({ bookingId: reviewing.reference, rating, comment });
+    if (!result.success) { setError(result.error.issues[0].message); return; }
+    setBusy(true);
+    try { const proof = await getProof("review"); const res = await fetch("/api/bookings/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...result.data, captchaProof: proof }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); setBookings(prev => prev.map(b => b.reference === reviewing.reference ? { ...b, review: data.review } : b)); setReviewing(null); setNotice("Thank you. Your review has been saved."); }
+    catch (e) { setError(e instanceof Error ? e.message : "Your review could not be saved."); }
+    finally { setBusy(false); }
+  }
+  return <><div className="account-heading"><div><span className="eyebrow">YOUR LITTLE CORNER OF HANNAH HOME</span><h1>Hello, {user.name.split(" ")[0]}.</h1><p>Good help, whenever your home needs it.</p></div><button className="button button-outline button-small" onClick={logout}><LogOut size={16}/> Sign out</button></div>{user.demo && <Notice>This is a local preview account. Bookings and reviews are sample records in temporary memory, not real service requests.</Notice>}{notice && <Notice>{notice}</Notice>}<div className="bookings-tabs"><button aria-pressed={tab === "upcoming"} className={tab === "upcoming" ? "active" : ""} onClick={() => setTab("upcoming")}>Upcoming <span>{bookings.filter(b => !isPast(b)).length}</span></button><button aria-pressed={tab === "past"} className={tab === "past" ? "active" : ""} onClick={() => setTab("past")}>Past bookings <span>{bookings.filter(isPast).length}</span></button></div>
+    {!visible.length && <div className="empty-state"><CalendarDays size={40} strokeWidth={1.3}/><h2>{tab === "upcoming" ? "A little room for a helping hand." : "Your home story starts here."}</h2><p>{tab === "upcoming" ? "You have no upcoming bookings. Let us take something off your list." : "Your past bookings will appear here. Completed jobs can be reviewed and rebooked."}</p><Link className="button" href="/services">Find a service <ArrowUpRight size={18}/></Link></div>}
+    <div className="bookings-list">{visible.map(b => { const s = getService(b.serviceId)!; return <article className="booking-record" key={b.reference}><div className="booking-record-heading"><div className="summary-service"><span className="service-icon"><ServiceIcon name={s.icon}/></span><div><h2>{s.name}</h2><p>{packageLabels[packageIds.indexOf(b.packageId)]} · {b.reference}</p></div></div><span className={`booking-status ${b.status}`}>{b.status === "pending" ? "Awaiting assignment" : b.status}</span></div><div className="booking-record-meta"><span><CalendarDays size={16}/>{formatDate(b.date)}</span><span><Clock3 size={16}/>{formatTime(b.time)} EAT</span><span><MapPin size={16}/>{b.area}</span><strong>{formatMoney(b.price)}</strong></div><p className="small">Professional: {b.professional || "will be assigned within 2 hours during service hours"}</p>{b.review && <div className="saved-review"><Check size={17}/><p><strong>Your rating: {b.review.rating} / 5</strong><br/>{b.review.comment}</p></div>}<div className="booking-record-actions"><Link className="text-link" href={`/booking-confirmation?ref=${b.reference}`}>View booking <ArrowUpRight size={15}/></Link>{isPast(b) && <Link className="button button-outline button-small" href={`/booking?service=${b.serviceId}&package=${b.packageId}`}><RotateCcw size={15}/> Book again</Link>}{b.status === "completed" && !b.review && <button className="button button-small" onClick={() => { setReviewing(b); setComment(""); setRating(5); setError(""); }}><MessageSquare size={15}/> Rate & review</button>}</div></article>; })}</div>
+    {reviewing && <Modal title="How did we do?" onClose={() => { if (!busy) setReviewing(null); }}><p>Your feedback helps us take better care of every home.</p><form onSubmit={e => { e.preventDefault(); void review(); }}><fieldset><legend>Your rating</legend><div className="rating-buttons">{[1, 2, 3, 4, 5].map(n => <button type="button" aria-pressed={rating === n} className={rating === n ? "active" : ""} key={n} onClick={() => setRating(n)}>{n}<span>/ 5</span></button>)}</div></fieldset><label className="field">Your review<textarea rows={4} maxLength={1000} value={comment} onChange={e => setComment(e.target.value)} required minLength={5} placeholder="What went well? What could we do better?"/></label>{error && <Notice error>{error}</Notice>}<button className="button full-button" disabled={busy}>{busy ? <><LoaderCircle className="spin" size={17}/> Saving...</> : "Send review"}</button><CaptchaNotice demo={!!user.demo}/></form></Modal>}{challengeUI}</>;
+}

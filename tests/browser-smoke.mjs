@@ -1,0 +1,62 @@
+import { chromium as playwright } from '../.cache/browser/node_modules/playwright/index.mjs';
+import chromium from '../.cache/browser/node_modules/@sparticuz/chromium/build/esm/index.js';
+import assert from 'node:assert/strict';
+process.env.LD_LIBRARY_PATH = `${process.cwd()}/.cache/browser/al2023/lib:${process.env.LD_LIBRARY_PATH || ''}`;
+const browser = await playwright.launch({ executablePath: await chromium.executablePath(), args: chromium.args.filter(a => a !== "--disable-web-security" && a !== "--allow-running-insecure-content"), headless: true });
+const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
+// Avoid device-dependent TTS in browser automation, while retaining the user-interaction API.
+await context.addInitScript(()=>{window.speechSynthesis.cancel=()=>{};window.speechSynthesis.speak=(u)=>{u.onstart?.();setTimeout(()=>u.onend?.(),20)};});
+const page=await context.newPage();const errors=[];const requests=[];
+page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error' && !m.location().url?.endsWith('/500')) errors.push(m.text())});page.on('request',r=>requests.push(r.url()));
+let count=0;const ok=(value,label)=>{assert.ok(value,label);count++;console.log('PASS',label)};
+async function go(path){await page.goto(`http://localhost:3000${path}`,{waitUntil:'networkidle'});await page.waitForSelector('.preloader',{state:'hidden'});}
+await go('/');
+ok(await page.locator('.service-card').count()===8,'homepage contains eight booking categories');
+ok(await page.locator('.professional-card').count()===4,'homepage contains four labelled professional profiles');
+ok(!(await page.evaluate(()=>document.body.textContent.includes(String.fromCharCode(8212)))),'rendered text has no banned punctuation');
+ok(!requests.some(u=>/google\.com|vercel-insights|va\.vercel/.test(u)),'no CAPTCHA or analytics loads before user submission or consent');
+await page.getByRole('button',{name:'Manage Preferences',exact:true}).click();
+ok(await page.getByRole('switch',{name:/Necessary/}).isDisabled(),'necessary consent is locked');
+ok(!(await page.getByRole('switch',{name:/Analytics/}).isChecked()),'optional analytics defaults off');
+await page.getByRole('button',{name:'Necessary only',exact:true}).click();
+const consent=await page.evaluate(()=>JSON.parse(localStorage.getItem('hannah_home_consent')));
+ok(consent.necessary && !consent.analytics && !consent.functional && !consent.marketing,'necessary-only consent is persisted under the required key');
+await page.reload({waitUntil:'networkidle'});await page.waitForSelector('.preloader',{state:'hidden'});
+ok(!(await page.locator('.consent-banner').count()),'consent persists after refresh');
+await page.screenshot({path:'.cache/home-desktop-final.png',fullPage:true});
+await go('/services');
+await page.getByRole('button',{name:'Repairs',exact:true}).click();ok(await page.locator('.service-card').count()===2,'service category filter updates results');
+await page.getByRole('textbox',{name:'Search services'}).fill('nonexistent');ok(await page.getByText('No services found',{exact:true}).isVisible(),'service search has a working empty state');
+await page.getByRole('button',{name:'Clear filters',exact:true}).click();ok(await page.locator('.service-card').count()===8,'clear filters restores all services');
+await go('/services/house-cleaning');ok(await page.locator('.pricing-table tbody tr').count()===3,'detail page has all bedroom prices');
+await go('/professionals');await page.getByRole('combobox',{name:'Service',exact:true}).selectOption('plumbing');ok(await page.locator('.professional-card').count()===1,'professional service filter works');await page.getByRole('combobox',{name:'Availability',exact:true}).selectOption('next');ok(await page.getByText('No matching profiles yet',{exact:true}).isVisible(),'professional availability filter works');
+await go('/my-bookings');await page.waitForURL(/auth\/signin/);ok(page.url().includes('/auth/signin'),'unsigned browser is redirected to sign-in');
+await page.getByRole('button',{name:'Enter preview account',exact:true}).click();await page.waitForURL(url=>url.pathname==='/my-bookings');await page.getByRole('heading',{name:'Hello, Preview.',exact:true}).waitFor();ok(await page.getByRole('heading',{name:'Hello, Preview.',exact:true}).isVisible(),'explicit test-account sign-in works');
+await page.getByRole('button',{name:/Past bookings/}).click();
+if(await page.getByRole('button',{name:'Rate & review',exact:true}).count()) {
+ await page.getByRole('button',{name:'Rate & review',exact:true}).click();await page.getByRole('textbox',{name:'Your review'}).fill('Helpful, careful and easy to book in this test.');await page.getByRole('button',{name:'Send review',exact:true}).click();await page.getByText('Thank you. Your review has been saved.',{exact:true}).waitFor();ok(true,'completed booking review is saved through the protected API');
+} else ok(await page.locator('.saved-review').count()>0,'previous completed-job review remains saved');
+await page.getByRole('link',{name:'Book again',exact:true}).first().click();await page.waitForURL(/\/booking\?/);ok(await page.getByLabel('2 bedroomAbout 3 hoursKSh 3,500',{exact:true}).count()>0 || await page.locator('.package-option.selected').innerText().then(t=>t.includes('2 bedroom')),'rebooking preselects the previous package');
+await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('heading',{name:'A time that works for you.',exact:true}).waitFor();
+await page.getByRole('button',{name:'Continue',exact:true}).click();ok(await page.locator('#time-error').isVisible(),'cannot advance without an available time');
+const date=new Date(Date.now()+(40+Math.floor(Math.random()*45))*86400000).toISOString().slice(0,10);await page.getByLabel(/Choose a date/).fill(date);
+await page.locator('.time-option').first().waitFor();await page.locator('.time-option:not(.disabled)').first().click();await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('heading',{name:'Where are we heading?',exact:true}).waitFor();
+await page.getByLabel('Building, street and house number',{exact:true}).fill('Fictional preview flat, Example Road B4');await page.getByLabel(/Access instructions/).fill('Preview test only. No real visit required.');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('heading',{name:'Let us keep in touch.',exact:true}).waitFor();
+await page.getByLabel('Phone number',{exact:true}).fill('0712345678');await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('heading',{name:'Make yourself at home.',exact:true}).waitFor();
+await page.getByRole('checkbox').check();await page.screenshot({path:'.cache/booking-review-desktop.png',fullPage:true});
+await page.getByRole('button',{name:'Confirm preview booking',exact:true}).click();await page.waitForURL(/booking-confirmation\?ref=/,{timeout:20000});await page.getByRole('heading',{name:'Your preview booking is saved.',exact:true}).waitFor();
+ok(true,'all five booking steps submit successfully');
+const reference=new URL(page.url()).searchParams.get('ref');ok(/^HH-[A-F0-9]{12}$/.test(reference),'confirmation shows a real generated preview reference');
+const calendar=await page.getByRole('link',{name:'Add to Google Calendar',exact:true}).getAttribute('href');ok(new URL(calendar).searchParams.get('ctz')==='Africa/Nairobi','calendar link uses the Nairobi timezone');
+await page.reload({waitUntil:'networkidle'});ok(await page.getByRole('heading',{name:'Your preview booking is saved.',exact:true}).isVisible(),'confirmation is retained on refresh');
+await go('/my-bookings');ok(await page.getByText(reference,{exact:false}).count()>0,'new booking appears in signed-in upcoming list');
+await go('/contact');await page.getByLabel('Your name',{exact:true}).fill('Preview Visitor');await page.getByLabel('Email address',{exact:true}).fill('test@example.com');await page.getByLabel('Phone number',{exact:true}).fill('0712345678');await page.getByLabel('How can we help?',{exact:true}).fill('I am testing the contact form with fictional details.');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'Send message',exact:true}).click();await page.getByText('Preview only. Your message was validated but no email was sent.',{exact:true}).waitFor();ok(true,'contact form validates without falsely claiming email delivery');
+for(const path of ['/legal/privacy-policy','/legal/terms','/legal/cookie-policy','/404','/500']){await go(path);ok(await page.locator('main h1').count()===1,`${path} renders`);}
+await go('/this-page-does-not-exist');ok(await page.getByRole('heading',{name:'This service page does not exist.',exact:true}).isVisible(),'unknown routes display the required 404 content');
+await page.setViewportSize({width:390,height:844});
+for(const path of ['/','/services','/booking','/professionals','/auth/signup','/contact','/my-bookings']){await go(path);ok(await page.evaluate(()=>document.body.scrollWidth<=innerWidth),`${path} has no horizontal overflow on mobile`);if(path==='/')await page.screenshot({path:'.cache/home-mobile-final.png',fullPage:true});if(path==='/booking')await page.screenshot({path:'.cache/booking-mobile-final.png',fullPage:true});}
+await page.getByRole('button',{name:'Open navigation',exact:true}).click();ok(await page.getByRole('dialog',{name:'Explore Hannah Home'}).isVisible(),'mobile navigation opens in an accessible dialog');await page.keyboard.press('Escape');ok(!(await page.getByRole('dialog').count()),'Escape closes the mobile navigation');
+const seriousErrors=errors.filter(e=>!e.includes('Failed to load resource: the server responded with a status of 404'));
+console.log('Browser console errors:',seriousErrors);ok(seriousErrors.length===0,'no hydration or runtime errors across tested pages');
+console.log(`\n${count} browser checks passed. Reference ${reference}`);
+await browser.close();

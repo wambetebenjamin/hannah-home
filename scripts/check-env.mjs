@@ -1,0 +1,8 @@
+const required = ['NEXT_PUBLIC_SITE_URL','NEXTAUTH_URL','NEXTAUTH_SECRET','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','NEXT_PUBLIC_RECAPTCHA_SITE_KEY','RECAPTCHA_SECRET_KEY','NEXT_PUBLIC_RECAPTCHA_V2_SITE_KEY','RECAPTCHA_V2_SECRET_KEY','KV_REST_API_URL','KV_REST_API_TOKEN','SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','SMTP_FROM'];
+const failures = required.filter(name=>!process.env[name]).map(name=>`${name} is missing`);
+for(const name of ['NEXT_PUBLIC_SITE_URL','NEXTAUTH_URL','KV_REST_API_URL']) if(process.env[name]) { try {const url=new URL(process.env[name]);if(url.protocol!=='https:') failures.push(`${name} must use HTTPS`);}catch{failures.push(`${name} must be a valid URL`);} }
+if(process.env.NEXTAUTH_SECRET && process.env.NEXTAUTH_SECRET.length<32) failures.push('NEXTAUTH_SECRET must contain at least 32 randomly generated characters');
+if(process.env.SMTP_PORT && (!Number.isInteger(Number(process.env.SMTP_PORT)) || Number(process.env.SMTP_PORT)<1 || Number(process.env.SMTP_PORT)>65535)) failures.push('SMTP_PORT must be a valid TCP port');
+try { if(process.env.NEXT_PUBLIC_SITE_URL && process.env.NEXTAUTH_URL && new URL(process.env.NEXT_PUBLIC_SITE_URL).origin!==new URL(process.env.NEXTAUTH_URL).origin) failures.push('NEXTAUTH_URL and NEXT_PUBLIC_SITE_URL must have the same origin'); } catch { /* invalid URLs already reported without exposing values */ }
+if(failures.length){console.error('Launch configuration is incomplete. Values are intentionally not printed.\n'+failures.map(x=>`- ${x}`).join('\n'));process.exit(1);}
+console.log('Required launch configuration is present. Test actual providers in staging before accepting customers.');

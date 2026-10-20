@@ -1,0 +1,7 @@
+# Preserve extracted template and upstream font assets byte for byte.
+# Their original trailing whitespace is not an application-code error.
+*.html -text -whitespace
+css/** -text -whitespace
+js/** -text -whitespace
+public/css/** -text -whitespace
+public/fonts/** -text -whitespace
