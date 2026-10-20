@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+const base = process.env.TEST_BASE_URL || 'http://localhost:3000';
+const origin = new URL(base).origin;
+let checks = 0;
+function check(value, message) { assert.ok(value, message); checks++; console.log(`PASS ${message}`); }
+async function req(path, body, cookie = '', method = body ? 'POST' : 'GET', extra = {}) {
+ const r = await fetch(`${base}${path}`, { method, redirect: 'manual', headers: { Origin: origin, ...(body ? {'Content-Type':'application/json'} : {}), ...(cookie ? {Cookie:cookie} : {}), ...extra }, ...(body ? { body: JSON.stringify(body) } : {}) });
+ let data; try { data = await r.json(); } catch { data = null; }
+ return { r, data };
+}
+const preview = await req('/api/auth/demo', {}, '');
+assert.equal(preview.r.status,200,'Run this smoke test only against the explicit local-development preview.');
+const cookie=preview.r.headers.get('set-cookie').split(';')[0];
+check(preview.data.demo,'test session is explicitly demo-only');
+const all=await req('/api/services'); check(all.data.services.length===8,'all 8 services returned');
+const filtered=await req('/api/services?category=Cleaning'); check(filtered.data.services.length===2,'category filtering works');
+check((await req('/api/services/house-cleaning')).data.service.prices[1]===3500,'service detail has server pricing');
+check((await req('/api/services/not-a-service')).r.status===404,'unknown service returns 404');
+check((await req('/api/bookings')).r.status===401,'bookings list is session gated');
+check((await req('/api/bookings/HH-000000000001')).r.status===401,'booking lookup is session gated');
+check((await req('/api/bookings/review',{})).r.status===401,'review is session gated');
+check((await req('/api/availability?serviceId=house-cleaning&date=2026-11-31')).r.status===400,'impossible dates rejected');
+check((await req('/api/recaptcha/verify',{token:'x',action:'not-real'})).r.status===400,'unrecognised CAPTCHA action rejected');
+check((await req('/api/recaptcha/verify',{token:'x',action:'booking'},'','POST',{Origin:'https://evil.example'})).r.status===403,'cross-origin mutation rejected');
+const date = new Date(Date.now()+Math.floor(10+Math.random()*20)*86400000).toISOString().slice(0,10);
+const times=await req(`/api/availability?serviceId=painting&date=${date}`); check(times.data.slots.length===4,'availability has 4 EAT arrival slots');
+async function proof(action='booking') { const {r,data}=await req('/api/recaptcha/verify',{token:'preview',action}); assert.equal(r.status,200,JSON.stringify(data)); return data.proof; }
+const booking={serviceId:'painting',packageId:'2-bedroom',date,time:'10:00',area:'Kilimani',address:'Fictional test flat, Example Road',instructions:'Automated preview test only',name:'Test Customer',phone:'0712345678',email:'test@example.com',payment:'mpesa',consent:true,idempotencyKey:randomUUID(),price:1,ownerEmail:'forged@example.com',status:'completed'};
+let first=await req('/api/bookings/create',{...booking,captchaProof:await proof()},cookie);
+assert.equal(first.r.status,201,JSON.stringify(first.data)); const ref=first.data.reference; const receipt=first.r.headers.get('set-cookie').split(';')[0];
+check(/^HH-[A-F0-9]{12}$/.test(ref),'booking reference is opaque and correctly formatted');
+const own=await req(`/api/bookings/${ref}`,undefined,cookie);
+check(own.data.booking.price===11000 && own.data.booking.status==='pending' && own.data.booking.ownerEmail==='preview@hannahhome.example','price, status and owner are server-authoritative');
+check((await req(`/api/bookings/${ref}`)).r.status===401,'knowing a reference does not reveal a booking');
+const repeat=await req('/api/bookings/create',{...booking,captchaProof:await proof()},cookie);
+check(repeat.r.status===201 && repeat.data.reference===ref,'idempotent retries reuse the booking');
+const wrongProof=await proof('contact');
+check((await req('/api/bookings/create',{...booking,captchaProof:wrongProof},cookie)).r.status===403,'CAPTCHA proof is bound to the form action');
+const two=await req('/api/bookings/create',{...booking,idempotencyKey:randomUUID(),captchaProof:await proof()},'');
+check(two.r.status===201,'guest booking works without claiming a verified account');
+check((await req(`/api/bookings/${two.data.reference}`,undefined,cookie)).r.status===404,'authenticated user cannot read a guest booking they do not own');
+const full=await req('/api/bookings/create',{...booking,idempotencyKey:randomUUID(),captchaProof:await proof()},cookie);
+check(full.r.status===409 && full.data.code==='SLOT_TAKEN','slot capacity is enforced');
+const taken=await req(`/api/availability?serviceId=painting&date=${date}`); check(taken.data.slots.find(s=>s.time==='10:00').available===false,'full slot disappears from availability');
+const pendingReview=await req('/api/bookings/review',{bookingId:ref,rating:5,comment:'Testing an unfinished job.',captchaProof:await proof('review')},cookie);
+check(pendingReview.r.status===409,'unfinished bookings cannot be reviewed');
+const completed=(await req('/api/bookings',undefined,cookie)).data.bookings.find(b=>b.status==='completed');
+const review=await req('/api/bookings/review',{bookingId:completed.reference,rating:4,comment:'Helpful preview experience.',captchaProof:await proof('review')},cookie);
+check([200,409].includes(review.r.status),'completed booking can be reviewed once');
+const duplicate=await req('/api/bookings/review',{bookingId:completed.reference,rating:5,comment:'Second review must be rejected.',captchaProof:await proof('review')},cookie);
+check(duplicate.r.status===409,'duplicate reviews are rejected');
+const contact=await req('/api/contact',{name:'Test Customer',phone:'0712345678',email:'test@example.com',message:'Preview test. Please do not deliver this.',consent:true,captchaProof:await proof('contact')});
+check(contact.r.status===200 && contact.data.demo===true && contact.data.message.includes('no email was sent'),'preview contact never claims to send real email');
+const receiptPage=await fetch(`${base}/booking-confirmation?ref=${ref}`,{headers:{Cookie:receipt}});
+check((await receiptPage.text()).includes('Your preview booking is saved.'),'signed receipt survives a page refresh');
+const hiddenPage=await fetch(`${base}/booking-confirmation?ref=${ref}`);
+check((await hiddenPage.text()).includes('Your booking details stay private.'),'unauthorised confirmation does not disclose details');
+const redirect=await fetch(`${base}/my-bookings`,{redirect:'manual'}); const redirectHtml=await redirect.text(); check((redirect.status===307 && redirect.headers.get('location')?.startsWith('/auth/signin')) || (redirectHtml.includes('http-equiv="refresh"') && redirectHtml.includes('/auth/signin?callbackUrl=/my-bookings') && !redirectHtml.includes('booking-record-heading')),'account page redirects unsigned visitors without rendering private data');
+console.log(`\n${checks} API integration checks passed. Preview reference: ${ref}`);

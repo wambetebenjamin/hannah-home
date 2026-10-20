@@ -1,0 +1,1 @@
+export default function Loading() { return <div className="route-loading" role="status"><svg className="loader-house" width="50" height="50" viewBox="0 0 64 64" fill="none" aria-hidden="true"><path d="M8 29L32 8L56 29M14 25V55H50V25M26 55V36H38V55" stroke="currentColor" strokeWidth="2"/></svg><p>Loading your next page...</p></div>; }

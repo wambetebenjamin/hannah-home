@@ -1,0 +1,12 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { assessCaptcha } from '../lib/captcha-policy.ts';
+const now = Date.parse('2026-10-20T10:00:00Z');
+const good = { success: true, hostname: 'hannahhome.example', challenge_ts: '2026-10-20T09:59:30Z', action: 'booking', score: .9 };
+const verify = (value: unknown, version: 'v3' | 'v2' = 'v3') => assessCaptcha(value, 'booking', 'hannahhome.example', version, now);
+test('v3 scores at or above 0.5 pass the server policy', () => { assert.deepEqual(verify(good), { valid: true, requiresV2: false }); assert.deepEqual(verify({ ...good, score: .5 }), { valid: true, requiresV2: false }); });
+test('scores below 0.5 require a real v2 challenge', () => { assert.deepEqual(verify({ ...good, score: .49 }), { valid: true, requiresV2: true }); assert.deepEqual(verify({ ...good, score: 0 }), { valid: true, requiresV2: true }); });
+test('hostnames and action names must match the current form', () => { assert.equal(verify({ ...good, hostname: 'evil.example' }).valid, false); assert.equal(verify({ ...good, action: 'contact' }).valid, false); assert.equal(verify({ ...good, action: undefined }).valid, false); });
+test('missing, invalid, expired or future timestamps fail closed', () => { for (const challenge_ts of [undefined, '', 'not-a-time', '2026-10-20T09:57:00Z', '2026-10-20T10:01:00Z']) assert.equal(verify({ ...good, challenge_ts }).valid, false); });
+test('v2 still requires success and a fresh response from the correct hostname', () => { assert.deepEqual(verify({ ...good, score: undefined, action: undefined }, 'v2'), { valid: true, requiresV2: false }); assert.equal(verify({ ...good, success: false }, 'v2').valid, false); assert.equal(verify({ ...good, hostname: 'evil.example' }, 'v2').valid, false); });
+test('malformed responses, string booleans and impossible scores are rejected', () => { for (const value of [null, undefined, [], 'success', { ...good, success: 'true' }, { ...good, score: '0.9' }, { ...good, score: -1 }, { ...good, score: 2 }, { ...good, score: NaN }]) assert.equal(verify(value).valid, false); });
